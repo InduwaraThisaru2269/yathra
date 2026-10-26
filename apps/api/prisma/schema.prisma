@@ -1,0 +1,435 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum ProjectRole {
+  BA
+  LEAD
+  DEV
+  QA
+  PM
+}
+
+enum IssueType {
+  EPIC
+  STORY
+  TASK
+  BUG
+  SUBTASK
+}
+
+enum IssueStatus {
+  BA_IN_PROGRESS
+  BA_ON_HOLD
+  LEAD_REVIEW
+  TO_GROOM
+  DEV_TODO
+  DEV_IN_PROGRESS
+  DEV_CODE_REVIEW
+  QA_TODO
+  QA_IN_PROGRESS
+  ON_HOLD
+  DONE
+}
+
+enum Priority {
+  HIGHEST
+  HIGH
+  MEDIUM
+  LOW
+  LOWEST
+}
+
+enum SprintState {
+  PLANNED
+  ACTIVE
+  CLOSED
+}
+
+enum LinkType {
+  BLOCKS
+  RELATES
+  DUPLICATES
+}
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique
+  name          String
+  /// Microsoft Entra object id, set once the user signs in with Microsoft.
+  entraOid      String?  @unique
+  /// Google account id ("sub"), set once the user signs in with Google.
+  googleSub     String?  @unique
+  /// scrypt hash; null for accounts that only use Microsoft or Google.
+  passwordHash  String?
+  emailVerified Boolean  @default(false)
+  isAdmin       Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+
+  sessions    Session[]
+  emailTokens EmailToken[]
+  memberships ProjectMember[]
+  assigned    Issue[]         @relation("IssueAssignee")
+  reported    Issue[]         @relation("IssueReporter")
+  comments    IssueComment[]
+  events      IssueEvent[]
+  wikiCreated WikiPage[]        @relation("WikiCreatedBy")
+  wikiUpdated WikiPage[]        @relation("WikiUpdatedBy")
+  wikiEdits   WikiPageVersion[]
+  retroItems  RetroItem[]
+  retroVotes  RetroVote[]
+  notifications        Notification[]        @relation("NotificationRecipient")
+  notificationsCaused  Notification[]        @relation("NotificationActor")
+  notificationSettings NotificationSettings?
+}
+
+/// A signed-in browser. Only the SHA-256 of the refresh token is stored.
+model Session {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique
+  provider   String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum EmailTokenPurpose {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+}
+
+/// One-time links sent by email. Only the SHA-256 of the token is stored.
+model EmailToken {
+  id        String            @id @default(uuid()) @db.Uuid
+  userId    String            @db.Uuid
+  purpose   EmailTokenPurpose
+  tokenHash String            @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+}
+
+model Project {
+  id            String   @id @default(uuid()) @db.Uuid
+  key           String   @unique
+  name          String
+  description   String?
+  issueCounter  Int      @default(0)
+  sprintCounter Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  members   ProjectMember[]
+  issues    Issue[]
+  sprints   Sprint[]
+  wikiPages WikiPage[]
+  notifications Notification[]
+}
+
+model ProjectMember {
+  projectId String      @db.Uuid
+  userId    String      @db.Uuid
+  role      ProjectRole
+  addedAt   DateTime    @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+}
+
+model Issue {
+  id             String       @id @default(uuid()) @db.Uuid
+  projectId      String       @db.Uuid
+  number         Int
+  key            String       @unique
+  type           IssueType
+  title          String
+  description    String?
+  status         IssueStatus
+  priority       Priority     @default(MEDIUM)
+  storyPoints    Int?
+  labels         String[]     @default([])
+  rank           Float
+  assigneeId     String?      @db.Uuid
+  reporterId     String       @db.Uuid
+  parentId       String?      @db.Uuid
+  sprintId       String?      @db.Uuid
+  holdReason     String?
+  holdFromStatus IssueStatus?
+  carryOverCount Int          @default(0)
+  dueDate        DateTime?
+  resolvedAt     DateTime?
+  version        Int          @default(1)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  project  Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee User?          @relation("IssueAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  reporter User           @relation("IssueReporter", fields: [reporterId], references: [id])
+  parent   Issue?         @relation("IssueParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children Issue[]        @relation("IssueParent")
+  sprint   Sprint?        @relation(fields: [sprintId], references: [id], onDelete: SetNull)
+  comments IssueComment[]
+  events   IssueEvent[]
+  linksOut IssueLink[]    @relation("LinkFrom")
+  linksIn  IssueLink[]    @relation("LinkTo")
+  sprintLogs SprintIssueLog[]
+  wikiLinks  WikiIssueLink[]
+  retroItems RetroItem[]
+
+  @@unique([projectId, number])
+  @@index([projectId, sprintId, rank])
+  @@index([projectId, status])
+  @@index([parentId])
+}
+
+model IssueComment {
+  id        String   @id @default(uuid()) @db.Uuid
+  issueId   String   @db.Uuid
+  authorId  String   @db.Uuid
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  issue  Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  author User  @relation(fields: [authorId], references: [id])
+
+  @@index([issueId, createdAt])
+}
+
+/// One row per change, so history, burndown and flow metrics can be rebuilt.
+model IssueEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  issueId   String   @db.Uuid
+  actorId   String?  @db.Uuid
+  field     String
+  fromValue String?
+  toValue   String?
+  createdAt DateTime @default(now())
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([issueId, createdAt])
+}
+
+model IssueLink {
+  id          String   @id @default(uuid()) @db.Uuid
+  fromIssueId String   @db.Uuid
+  toIssueId   String   @db.Uuid
+  type        LinkType
+  createdAt   DateTime @default(now())
+
+  fromIssue Issue @relation("LinkFrom", fields: [fromIssueId], references: [id], onDelete: Cascade)
+  toIssue   Issue @relation("LinkTo", fields: [toIssueId], references: [id], onDelete: Cascade)
+
+  @@unique([fromIssueId, toIssueId, type])
+}
+
+model Sprint {
+  id              String      @id @default(uuid()) @db.Uuid
+  projectId       String      @db.Uuid
+  sequence        Int
+  name            String
+  goal            String?
+  state           SprintState @default(PLANNED)
+  startDate       DateTime?
+  endDate         DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  committedPoints Int?
+  completedPoints Int?
+  createdAt       DateTime    @default(now())
+
+  project Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issues  Issue[]
+  logs    SprintIssueLog[]
+  retro   Retro?
+
+  @@unique([projectId, sequence])
+  @@index([projectId, state])
+}
+
+/// Membership history of an issue in a sprint: drives scope change, carry-over and the sprint report.
+model SprintIssueLog {
+  id              String    @id @default(uuid()) @db.Uuid
+  sprintId        String    @db.Uuid
+  issueId         String    @db.Uuid
+  points          Int?
+  addedAt         DateTime  @default(now())
+  addedAfterStart Boolean   @default(false)
+  removedAt       DateTime?
+  outcome         String?
+
+  sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  issue  Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@index([sprintId])
+  @@index([issueId])
+}
+
+/// A project wiki page. Content is Markdown; every save also writes a WikiPageVersion.
+model WikiPage {
+  id          String    @id @default(uuid()) @db.Uuid
+  projectId   String    @db.Uuid
+  parentId    String?   @db.Uuid
+  title       String
+  content     String    @default("")
+  /// Sibling order inside the parent, spaced like issue ranks.
+  position    Float
+  version     Int       @default(1)
+  createdById String    @db.Uuid
+  updatedById String    @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  archivedAt  DateTime?
+
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent    WikiPage?         @relation("WikiTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  WikiPage[]        @relation("WikiTree")
+  createdBy User              @relation("WikiCreatedBy", fields: [createdById], references: [id])
+  updatedBy User              @relation("WikiUpdatedBy", fields: [updatedById], references: [id])
+  versions  WikiPageVersion[]
+  issues    WikiIssueLink[]
+
+  @@index([projectId, parentId, position])
+}
+
+model WikiPageVersion {
+  id         String   @id @default(uuid()) @db.Uuid
+  pageId     String   @db.Uuid
+  version    Int
+  title      String
+  content    String
+  editedById String   @db.Uuid
+  createdAt  DateTime @default(now())
+
+  page     WikiPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  editedBy User     @relation(fields: [editedById], references: [id])
+
+  @@unique([pageId, version])
+}
+
+/// Ticket keys mentioned on a page, rebuilt on every save; powers the "Wiki pages" backlinks on an issue.
+model WikiIssueLink {
+  pageId  String @db.Uuid
+  issueId String @db.Uuid
+
+  page  WikiPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  issue Issue    @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@id([pageId, issueId])
+  @@index([issueId])
+}
+
+enum RetroColumn {
+  WENT_WELL
+  TO_IMPROVE
+  ACTION
+}
+
+/// One retrospective per sprint, created the first time someone opens it.
+model Retro {
+  id        String    @id @default(uuid()) @db.Uuid
+  sprintId  String    @unique @db.Uuid
+  createdAt DateTime  @default(now())
+  closedAt  DateTime?
+
+  sprint Sprint      @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  items  RetroItem[]
+}
+
+model RetroItem {
+  id        String      @id @default(uuid()) @db.Uuid
+  retroId   String      @db.Uuid
+  column    RetroColumn
+  text      String
+  anonymous Boolean     @default(false)
+  authorId  String      @db.Uuid
+  /// The ticket an action item was turned into.
+  issueId   String?     @unique @db.Uuid
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  retro  Retro       @relation(fields: [retroId], references: [id], onDelete: Cascade)
+  author User        @relation(fields: [authorId], references: [id])
+  issue  Issue?      @relation(fields: [issueId], references: [id], onDelete: SetNull)
+  votes  RetroVote[]
+
+  @@index([retroId, column])
+}
+
+model RetroVote {
+  itemId    String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  item RetroItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, userId])
+  @@index([userId])
+}
+
+enum NotificationType {
+  ASSIGNED
+  MENTIONED
+  COMMENTED
+  LEAD_REVIEW_REQUESTED
+  RETURNED_TO_BA
+  READY_FOR_QA
+  QA_FAILED
+  ISSUE_DONE
+  ADDED_TO_PROJECT
+  SPRINT_STARTED
+  SPRINT_COMPLETED
+}
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  projectId String?          @db.Uuid
+  actorId   String?          @db.Uuid
+  type      NotificationType
+  title     String
+  body      String?
+  /// Path inside the web app, e.g. /p/TN/board?issue=TN-12
+  link      String
+  readAt    DateTime?
+  emailedAt DateTime?
+  createdAt DateTime         @default(now())
+
+  user    User     @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  actor   User?    @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+
+/// Which notification types a user also wants by email. In-app notifications are always on.
+model NotificationSettings {
+  userId    String             @id @db.Uuid
+  emailFor  NotificationType[] @default([ASSIGNED, MENTIONED, RETURNED_TO_BA, QA_FAILED, ADDED_TO_PROJECT])
+  updatedAt DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
